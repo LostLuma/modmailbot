@@ -203,4 +203,59 @@ module.exports = ({ bot, knex, config, commands }) => {
 
     await sendCloseNotification(thread, `Modmail thread #${thread.thread_number} with ${thread.user_name} (${thread.user_id}) was closed automatically because the channel was deleted`);
   });
+
+  // Auto-close threads on member remove if option is set
+  if (config.autoCloseAfterLeave) {
+    function isMainGuild(guild) {
+      return utils.getMainGuilds().some((entry) => entry.id == guild.id);
+    }
+
+    async function isInOtherMainGuild(guild, member) {
+      for (const mainGuild of utils.getMainGuilds()) {
+        if (mainGuild.id == guild.id) continue;
+        let found = mainGuild.members.get(member.id);
+
+        if (! found) {
+          try {
+            found = await bot.getRESTGuildMember(mainGuild.id, member.id);
+          } catch {
+            continue;
+          }
+        }
+
+        return true;
+      }
+    }
+
+    // We only want to close/reopen the thread if the member left
+    // Every main guild, not just the one the current event is for
+    async function isSignificantMemberChangeEvent(guild, member) {
+      if (! isMainGuild(guild)) return;
+      return await isInOtherMainGuild(guild, member) ? false : true;
+    }
+
+    bot.on("guildMemberRemove", async (guild, member) => {
+      if (! isSignificantMemberChangeEvent(guild, member)) return;
+
+      const thread = await threads.findOpenThreadByUserId(member.id);
+      if (! thread) return;
+
+      const delay = config.autoCloseAfterLeave * 1000 * 60;
+      const closeAt = moment.utc().add(delay, "ms");
+
+      await thread.scheduleClose(closeAt.format("YYYY-MM-DD HH:mm:ss"), member);
+      thread.postSystemMessage(`Thread is now scheduled to be closed in ${utils.humanizeDelay(delay)}. Use \`${config.prefix}close cancel\` to cancel.`);
+    })
+
+    bot.on("guildMemberAdd", async (guild, member) => {
+      if (! isSignificantMemberChangeEvent(guild, member)) return;
+
+      const thread = await threads.findOpenThreadByUserId(member.id);
+
+      if (thread && thread.scheduled_close_at) {
+        await thread.cancelScheduledClose();
+        thread.postSystemMessage("Cancelling scheduled closing of this thread because the user rejoined.");
+      }
+    })
+  }
 };
